@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>我的秘書</title>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --ink:#1f2430; --mute:#7a8194; --line:#e3e7f0; --accent:#5b7fd6; --today:#eef3ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif; background:var(--bg); color:var(--ink); }
+  header { position:sticky; top:0; background:var(--card); border-bottom:1px solid var(--line); z-index:2; }
+  h1 { font-size:18px; margin:0; padding:14px 16px 6px; }
+  nav { display:flex; gap:4px; padding:0 12px 10px; }
+  nav button { flex:1; border:0; background:var(--bg); padding:10px; border-radius:10px; font-size:15px; color:var(--mute); }
+  nav button.on { background:var(--accent); color:#fff; font-weight:600; }
+  main { max-width:720px; margin:0 auto; padding:12px; }
+  .card { background:var(--card); border-radius:14px; padding:14px; margin-bottom:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .row button { border:1px solid var(--line); background:var(--card); border-radius:8px; padding:6px 12px; font-size:15px; }
+  .cal { display:grid; grid-template-columns:repeat(7,1fr); gap:2px; margin-top:10px; }
+  .cal .wd { text-align:center; font-size:12px; color:var(--mute); padding:4px 0; }
+  .cal .d { min-height:54px; border-radius:8px; padding:4px; font-size:12px; background:var(--bg); cursor:pointer; }
+  .cal .d.out { visibility:hidden; }
+  .cal .d.today { background:var(--today); outline:2px solid var(--accent); }
+  .cal .d.sel { background:var(--accent); color:#fff; }
+  .cal .n { font-weight:600; }
+  .dots { display:flex; flex-wrap:wrap; gap:2px; margin-top:3px; }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--accent); }
+  .dot.todo { background:#e0a43a; }
+  .cal .d.sel .dot { background:#fff; }
+  h2 { font-size:15px; margin:0 0 8px; }
+  .item { padding:8px 0; border-top:1px solid var(--line); }
+  .item:first-of-type { border-top:0; }
+  .t { font-weight:600; }
+  .m { color:var(--mute); font-size:13px; margin-top:2px; }
+  .empty { color:var(--mute); font-size:14px; }
+  input[type=search] { width:100%; font-size:16px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; }
+  .err { color:#c0392b; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔐 我的秘書</h1>
+  <nav>
+    <button data-tab="cal" class="on">月曆</button>
+    <button data-tab="rec">紀錄</button>
+    <button data-tab="search">搜尋</button>
+  </nav>
+</header>
+<main id="main"></main>
+<script src="config.js"></script>
+<script>
+(() => {
+  // 通行碼從 LINE 給的連結（#t=...）帶進來，存在這支手機，並從網址列移除
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get("t")) { localStorage.setItem("sec_token", h.get("t")); history.replaceState(null, "", location.pathname); }
+  const token = localStorage.getItem("sec_token");
+  const main = document.getElementById("main");
+  const W = ["日","一","二","三","四","五","六"];
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  // 台北時間（UTC+8）
+  const tp = (iso) => { const t = new Date(new Date(iso).getTime() + 8*3600e3); return { date:t.toISOString().slice(0,10), hm:t.toISOString().slice(11,16), md:`${t.getUTCMonth()+1}/${t.getUTCDate()}`, wd:W[t.getUTCDay()] }; };
+  const todayStr = () => new Date(Date.now() + 8*3600e3).toISOString().slice(0,10);
+  const md = (d) => { const [,m,dd] = d.split("-").map(Number); return `${m}/${dd}`; };
+  const wdOf = (d) => W[new Date(d+"T00:00:00Z").getUTCDay()];
+
+  async function api(params) {
+    const r = await fetch(`${SEC_CONFIG.apiUrl}?${new URLSearchParams(params)}`, { headers: { "x-token": token } });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    return j;
+  }
+  const evHtml = (e, withDate) => {
+    const s = tp(e.starts_at);
+    const time = e.all_day ? "整天" : e.ends_at ? `${s.hm}–${tp(e.ends_at).hm}` : s.hm;
+    return `<div class="item"><div class="t">${esc(e.title)}</div><div class="m">📅 ${withDate ? `${s.md}（${s.wd}）` : ""}${time}${e.location ? ` ・ 📍${esc(e.location)}` : ""}</div></div>`;
+  };
+  const tdHtml = (t) => {
+    const tag = t.urgent && t.important ? "🔴" : t.important ? "🟠" : t.urgent ? "🟡" : "⚪";
+    const bits = [];
+    if (t.due_date) bits.push(`期限 ${md(t.due_date)}（${wdOf(t.due_date)}）`);
+    if (t.waiting_on) bits.push(`等 ${esc(t.waiting_on)} 回報`);
+    if (t.done_at) bits.push(`完成於 ${tp(t.done_at).md}`);
+    return `<div class="item"><div class="t">${t.done_at ? "✅" : tag} #${t.id} ${esc(t.title)}</div>${bits.length ? `<div class="m">${bits.join(" ・ ")}</div>` : ""}</div>`;
+  };
+  const list = (title, items, fn, empty) =>
+    `<div class="card"><h2>${title}</h2>${items.length ? items.map(fn).join("") : `<div class="empty">${empty}</div>`}</div>`;
+
+  // ---- 月曆 ----
+  let month = todayStr().slice(0,7), sel = todayStr();
+  async function renderCal() {
+    main.innerHTML = `<div class="card empty">載入中…</div>`;
+    const data = await api({ view: "month", month });
+    const [y, m] = month.split("-").map(Number);
+    const first = new Date(Date.UTC(y, m-1, 1)).getUTCDay();
+    const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const byDay = {};
+    data.events.forEach((e) => (byDay[tp(e.starts_at).date] ??= { e:[], t:[] }).e.push(e));
+    data.todos.forEach((t) => (byDay[t.due_date] ??= { e:[], t:[] }).t.push(t));
+    let cells = W.map((w) => `<div class="wd">${w}</div>`).join("");
+    for (let i = 0; i < first; i++) cells += `<div class="d out"></div>`;
+    for (let d = 1; d <= days; d++) {
+      const ds = `${month}-${String(d).padStart(2,"0")}`, b = byDay[ds];
+      const dots = b ? b.e.map(() => `<span class="dot"></span>`).join("") + b.t.map(() => `<span class="dot todo"></span>`).join("") : "";
+      cells += `<div class="d${ds === todayStr() ? " today" : ""}${ds === sel ? " sel" : ""}" data-d="${ds}"><div class="n">${d}</div><div class="dots">${dots}</div></div>`;
+    }
+    const b = byDay[sel] ?? { e:[], t:[] };
+    main.innerHTML = `
+      <div class="card">
+        <div class="row"><button id="prev">‹</button><b>${y} 年 ${m} 月</b><button id="next">›</button></div>
+        <div class="cal">${cells}</div>
+      </div>
+      ${sel.startsWith(month) ? list(`${md(sel)}（${wdOf(sel)}）行程`, b.e, (e) => evHtml(e), "這天沒有行程。") + (b.t.length ? list("這天到期的待辦", b.t, tdHtml, "") : "") : ""}`;
+    const shift = (n) => { const d = new Date(Date.UTC(y, m-1+n, 1)); month = d.toISOString().slice(0,7); sel = `${month}-01`; go(renderCal); };
+    document.getElementById("prev").onclick = () => shift(-1);
+    document.getElementById("next").onclick = () => shift(1);
+    main.querySelectorAll(".d[data-d]").forEach((el) => el.onclick = () => { sel = el.dataset.d; go(renderCal); });
+  }
+
+  // ---- 紀錄 ----
+  async function renderRec() {
+    main.innerHTML = `<div class="card empty">載入中…</div>`;
+    const d = await api({ view: "records" });
+    main.innerHTML =
+      list(`未完成待辦（${d.open.length}）`, d.open, tdHtml, "目前沒有待辦。") +
+      list("最近完成", d.done, tdHtml, "最近 60 天沒有完成紀錄。") +
+      list("過去行程", d.past, (e) => evHtml(e, true), "最近 60 天沒有行程。");
+  }
+
+  // ---- 搜尋 ----
+  let q = "";
+  async function renderSearch() {
+    main.innerHTML = `<div class="card"><input type="search" id="q" placeholder="搜尋行程、待辦、地點、人名…" value="${esc(q)}"></div><div id="res"></div>`;
+    const input = document.getElementById("q"), res = document.getElementById("res");
+    let timer;
+    const run = async () => {
+      q = input.value.trim();
+      if (!q) { res.innerHTML = ""; return; }
+      try {
+        const d = await api({ view: "search", q });
+        res.innerHTML = list(`行程（${d.events.length}）`, d.events, (e) => evHtml(e, true), "沒有符合的行程。") +
+                        list(`待辦（${d.todos.length}）`, d.todos, tdHtml, "沒有符合的待辦。");
+      } catch (e) { res.innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
+    };
+    input.oninput = () => { clearTimeout(timer); timer = setTimeout(run, 300); };
+    if (q) run();
+    input.focus();
+  }
+
+  async function go(fn) {
+    try { await fn(); } catch (e) { main.innerHTML = `<div class="card err">讀取失敗：${esc(e.message)}<br>請從 LINE 秘書的「開啟網站」重新打開。</div>`; }
+  }
+  const tabs = { cal: renderCal, rec: renderRec, search: renderSearch };
+  document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
+    document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
+    go(tabs[b.dataset.tab]);
+  });
+  if (!token) main.innerHTML = `<div class="card">請從 LINE 秘書的「開啟網站」按鈕打開這個網頁。</div>`;
+  else go(renderCal);
+})();
+</script>
+</body>
+</html>
